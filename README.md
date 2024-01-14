@@ -12,7 +12,7 @@ The following class and functions (and related tests) have be ported:
 * `SequenceMatcher`
 * `unified_diff()`
 * `context_diff()`
-* `Differ`
+* `Differ`  (NEW!!!)
 
 ## Installation
 
