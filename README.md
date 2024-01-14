@@ -17,7 +17,7 @@ The following class and functions (and related tests) have be ported:
 ## Installation
 
 ```bash
-$ go get github.com/pmezard/go-difflib/difflib
+$ go get github.com/David366AI/go-difflib/difflib
 ```
 
 ### Quick Start
