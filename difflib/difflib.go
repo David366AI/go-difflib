@@ -199,12 +199,15 @@ func (m *SequenceMatcher) isBJunk(s string) bool {
 // If IsJunk is not defined:
 //
 // Return (i,j,k) such that a[i:i+k] is equal to b[j:j+k], where
-//     alo <= i <= i+k <= ahi
-//     blo <= j <= j+k <= bhi
+//
+//	alo <= i <= i+k <= ahi
+//	blo <= j <= j+k <= bhi
+//
 // and for all (i',j',k') meeting those conditions,
-//     k >= k'
-//     i <= i'
-//     and if i == i', j <= j'
+//
+//	k >= k'
+//	i <= i'
+//	and if i == i', j <= j'
 //
 // In other words, of all maximal matching blocks, return one that
 // starts earliest in a, and of all those maximal matching blocks that
@@ -769,4 +772,213 @@ func SplitLines(s string) []string {
 	lines := strings.SplitAfter(s, "\n")
 	lines[len(lines)-1] += "\n"
 	return lines
+}
+
+type Differ struct {
+	LineJunk func(string) bool
+	CharJunk func(string) bool
+}
+
+func IsCharacterJunk(substr string) bool {
+	return strings.Contains(" \t", substr)
+}
+
+func NewDiffer(lineJunk func(string) bool, charJunk func(string) bool) *Differ {
+	differ := Differ{
+		LineJunk: lineJunk,
+		CharJunk: charJunk,
+	}
+	return &differ
+}
+
+func (self *Differ) Compare(a, b []string) []string {
+	m := NewMatcher(a, b)
+	ops := m.GetOpCodes()
+	result := make([]string, 0)
+	for _, op := range ops {
+		switch op.Tag {
+		case 'r':
+			result = self.fancyReplace(a, op.I1, op.I2, b, op.J1, op.J2, result)
+		case 'd':
+			result = self.dump("-", a, op.I1, op.I2, result)
+		case 'i':
+			result = self.dump("+", b, op.J1, op.J2, result)
+		case 'e':
+			result = self.dump(" ", a, op.I1, op.I2, result)
+		}
+	}
+	return result
+}
+
+func (self *Differ) dump(tag string, word []string, lo int, hi int, result []string) []string {
+	for i := lo; i < hi; i++ {
+		result = append(result, fmt.Sprintf("%s %s", tag, word[i]))
+	}
+	return result
+}
+
+func (self *Differ) fancyHelper(a []string, alo, ahi int, b []string, blo, bhi int, result []string) []string {
+	if alo < ahi {
+		if blo < bhi {
+			result = self.fancyReplace(a, alo, ahi, b, blo, bhi, result)
+		} else {
+			result = self.dump("-", a, alo, ahi, result)
+		}
+	} else if blo < bhi {
+		result = self.dump("+", b, blo, bhi, result)
+	}
+	return result
+}
+
+func (self *Differ) plainReplace(a []string, alo, ahi int, b []string, blo, bhi int, result []string) []string {
+	// Check that alo < ahi and blo < bhi
+	if !(alo < ahi && blo < bhi) {
+		panic("alo < ahi and blo < bhi must be true")
+	}
+
+	// Dump the shorter block first
+	if bhi-blo < ahi-alo {
+		result = self.dump("+", b, blo, bhi, result)
+		result = self.dump("-", a, alo, ahi, result)
+	} else {
+		result = self.dump("-", a, alo, ahi, result)
+		result = self.dump("+", b, blo, bhi, result)
+	}
+
+	return result
+}
+
+func NewMatcherForCharsWithJunk(a, b string, autoJunk bool,
+	isJunk func(string) bool) *SequenceMatcher {
+
+	m := SequenceMatcher{IsJunk: isJunk, autoJunk: autoJunk}
+	m.SetSeqs(strings.Split(a, ""), strings.Split(b, ""))
+	return &m
+}
+
+func (self *Differ) fancyReplace(a []string, alo, ahi int, b []string, blo, bhi int, result []string) []string {
+	// don't synch up unless the lines have a similarity score of at
+	// least cutoff; bestRatio tracks the best score seen so far
+	bestRatio, cutoff := 0.74, 0.75
+	cruncher := NewMatcherForCharsWithJunk("", "", true, self.CharJunk)
+	eqi := -1
+	eqj := -1 // 1st indices of equal lines (if any)
+	best_i := -1
+	best_j := -1
+	// Search for the pair that matches best without being identical
+	// (identical lines must be junk lines, & we don't want to synch up
+	// on junk -- unless we have to)
+	for j := blo; j < bhi; j++ {
+		bj := b[j]
+		cruncher.SetSeq2(strings.Split(bj, ""))
+		for i := alo; i < ahi; i++ {
+			ai := a[i]
+			if ai == bj {
+				if eqi < 0 {
+					eqi, eqj = i, j
+				}
+				continue
+			}
+			cruncher.SetSeq1(strings.Split(ai, ""))
+			// Computing similarity is expensive, so use the quick
+			// upper bounds first -- have seen this speed up messy
+			// compares by a factor of 3.
+			// Note that ratio() is only expensive to compute the first
+			// time it's called on a sequence pair; the expensive part
+			// of the computation is cached by cruncher.
+			if cruncher.RealQuickRatio() > bestRatio &&
+				cruncher.QuickRatio() > bestRatio &&
+				cruncher.Ratio() > bestRatio {
+				bestRatio, best_i, best_j = cruncher.Ratio(), i, j
+			}
+		}
+	}
+	if bestRatio < cutoff {
+		// No non-identical "pretty close" pair
+		if eqi < 0 {
+			// No identical pair either -- treat it as a straight replace
+			return self.plainReplace(a, alo, ahi, b, blo, bhi, result)
+		}
+		// No close pair, but an identical pair -- synch up on that
+		best_i, best_j, bestRatio = eqi, eqj, 1.0
+	} else {
+		// There's a close pair, so forget the identical pair (if any)
+		eqi = -1
+	}
+
+	// A[best_i] very similar to B[best_j]; eqi is nil iff they're not
+	// identical
+
+	// Pump out diffs from before the synch point
+	result = self.fancyHelper(a, alo, best_i, b, blo, best_j, result)
+
+	// Do intraline marking on the synch pair
+	aelt, belt := a[best_i], b[best_j]
+	if eqi < 0 {
+		// Pump out a '-', '?', '+', '?' quad for the synched lines
+		atags, btags := "", ""
+		cruncher.SetSeqs(strings.Split(aelt, ""), strings.Split(belt, ""))
+		for _, opcode := range cruncher.GetOpCodes() {
+			tag, ai1, ai2, bj1, bj2 := opcode.Tag, opcode.I1, opcode.I2, opcode.J1, opcode.J2
+			la, lb := ai2-ai1, bj2-bj1
+			if tag == 'r' {
+				atags += strings.Repeat("^", la)
+				btags += strings.Repeat("^", lb)
+			} else if tag == 'd' {
+				atags += strings.Repeat("-", la)
+			} else if tag == 'i' {
+				btags += strings.Repeat("+", lb)
+			} else if tag == 'e' {
+				atags += strings.Repeat(" ", la)
+				btags += strings.Repeat(" ", lb)
+			} else {
+				panic(fmt.Sprintf("unknown tag %v", tag))
+			}
+		}
+		result = self.qformat(aelt, belt, atags, btags, result)
+	} else {
+		// The synch pair is identical
+		result = append(result, "  "+aelt)
+	}
+
+	// Pump out diffs from after the synch point
+	return self.fancyHelper(a, best_i+1, ahi, b, best_j+1, bhi, result)
+}
+
+func keepOriginalWhiteSpace(s, tag_s string) string {
+	var result string
+
+	for i := 0; i < len(s) && i < len(tag_s); i++ {
+		c := s[i]
+		tag_c := tag_s[i]
+
+		if tag_c == ' ' && c == ' ' {
+			result += string(c)
+		} else {
+			result += string(tag_c)
+		}
+	}
+
+	if len(tag_s) > len(s) {
+		result += tag_s[len(s):]
+	}
+
+	return result
+}
+
+func (d *Differ) qformat(aline, bline, atags, btags string, result []string) []string {
+	// atags = keepOriginalWhiteSpace(aline, atags)
+	// btags = keepOriginalWhiteSpace(bline, btags)
+
+	result = append(result, fmt.Sprintf("- %s", aline))
+	// if atags != "" {
+	// 	result = append(result, "? "+atags)
+	// }
+
+	result = append(result, fmt.Sprintf("+ %s", bline))
+	// if btags != "" {
+	// 	result = append(result, "? "+btags)
+	// }
+
+	return result
 }
